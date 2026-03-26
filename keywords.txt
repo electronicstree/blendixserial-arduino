@@ -1,0 +1,42 @@
+#######################################
+# Syntax Highlighting for blendixserial
+# Format: keyword    keyword-type
+#######################################
+
+# KEYWORD1 = Classes, Datatypes (orange/bold)
+blendixserial	KEYWORD1
+
+# KEYWORD2 = Methods/Functions (brown)
+setValue	KEYWORD2
+setLocation	KEYWORD2
+setRotation	KEYWORD2
+setScale	KEYWORD2
+setText	KEYWORD2
+bodBuild	KEYWORD2
+bodParse	KEYWORD2
+axisAvailable	KEYWORD2
+getValue	KEYWORD2
+getLocation	KEYWORD2
+getRotation	KEYWORD2
+getScale	KEYWORD2
+textAvailable	KEYWORD2
+getText	KEYWORD2
+
+# LITERAL1 = Constants, Enums (blue)
+Location	LITERAL1
+Rotation	LITERAL1
+Scale	LITERAL1
+X	LITERAL1
+Y	LITERAL1
+Z	LITERAL1
+Property	LITERAL1
+Axis	LITERAL1
+BLENDIXSERIAL_STX	LITERAL1
+BLENDIXSERIAL_ETX	LITERAL1
+
+# KEYWORD3 = Preprocessor macros / defines (dark blue/purple)
+BLENDIXSERIAL_MAX_OBJECTS	KEYWORD3
+BLENDIXSERIAL_MAX_PAYLOAD	KEYWORD3
+BLENDIXSERIAL_MAX_TEXT	KEYWORD3
+BLENDIXSERIAL_MAX_PACKET_SIZE	KEYWORD3
+
