@@ -335,11 +335,17 @@ uint16_t blendixserial::buildPayload(uint8_t *payload,uint8_t &msgType,uint8_t &
  */
 uint16_t blendixserial::bodBuild(uint8_t *buffer)
 {
-    uint8_t payload[BLENDIXSERIAL_MAX_PAYLOAD];
+    // [CHANGED] Removed: uint8_t payload[BLENDIXSERIAL_MAX_PAYLOAD]
+    // Previously a local stack buffer (128 bytes) was allocated here every time bodBuild() was called.
+    // Now we reuse the member payload[] buffer instead.
+    // This saves 128 bytes of peak stack usage with no side effects, because Arduino is
+    // single-threaded — bodBuild() and bodParse() never run at the same time, so the
+    // member buffer is never in use by the RX path while TX is building a packet.
     uint8_t msgType=0;
     uint8_t objCount=0;
 
-    uint16_t payloadLen=buildPayload(payload,msgType,objCount);
+    // [CHANGED] Pass this->payload instead of the removed local buffer
+    uint16_t payloadLen=buildPayload(this->payload,msgType,objCount);
 
     if(payloadLen==0) return 0; // Early exit: nothing changed → don't send empty packet
 
@@ -351,7 +357,8 @@ uint16_t blendixserial::bodBuild(uint8_t *buffer)
     buffer[4]=payloadLen&0xFF;  // length low byte
 
     // Copy prepared payload right after header
-    memcpy(buffer+5,payload,payloadLen);
+    // [CHANGED] memcpy source is now this->payload instead of the removed local buffer
+    memcpy(buffer+5,this->payload,payloadLen);
 
     // ───── Compute simple 8-bit XOR checksum ─────
     // Covers: msgType + objCount + len(2) + payload
@@ -359,7 +366,8 @@ uint16_t blendixserial::bodBuild(uint8_t *buffer)
 
     for(int i=1;i<5;i++) checksum^=buffer[i];
 
-    for(int i=0;i<payloadLen;i++) checksum^=payload[i];
+    // [CHANGED] checksum loop now reads from this->payload instead of the removed local buffer
+    for(int i=0;i<payloadLen;i++) checksum^=this->payload[i];
 
     buffer[5+payloadLen]=checksum;
     buffer[6+payloadLen]=BLENDIXSERIAL_ETX; // 0x03
