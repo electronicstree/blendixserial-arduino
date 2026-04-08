@@ -11,7 +11,9 @@ blendixserial is an Arduino library that enables real-time, two-way communicatio
 ![Logo](https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEiGNnVIOoxRX6aHYeYyJ0QT1i-QVphdHVB9fmAdPQVGwlD4HLYs93XxYV8hMtnX7M0Fbh6QGxYiTzH3nqEpBvtBv-oQIS1FbCINqn-kJT9jQJuKrZRC8IeuqhR9G8-Qub3etiKLiZpXQWW7nBNOSh9DgJjOKsocKliayJhjwk3nYN6wXpbzSjopdccC/s16000/blendixserial.png)
 
 ## Installation 
-![Arduino Library Manager](https://img.shields.io/badge/Arduino%20Library%20Manager-blendixserial-brightgreen?logo=arduino&logoColor=brightgreen)
+![Arduino Library Manager](https://img.shields.io/badge/Arduino_Library_Manager-brightgreen?logo=arduino&logoColor=white)
+
+
 
 The blendixserial library can be installed either through the Arduino Library Manager or manually from source.
 
