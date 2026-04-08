@@ -16,36 +16,47 @@
 
 /*
   If you discover any bugs or have suggestions, please let me know!
-  
+
   Author: Usman
   Maintainer: Usman https://github.com/ELECTRONICSTREE/BlendixSerial-Arduino
   Email: help@electronicstree.com
-  Date: 9-Mar-2026
+  Date: 8-April-2026
 */
 
 
 /**
  * @file blendixserial.h
- * @brief Bidirectional compact binary protocol for real-time 3D transform & text synchronization
- *        between Blender and microcontrollers.
+ * @brief Bidirectional compact binary protocol for real-time 3D transform & text
+ *        synchronisation between Blender and microcontrollers.
  *
  * Protocol characteristics:
- * - Framed binary format with STX / ETX markers
- * - 8-bit XOR checksum covering header + payload
- * - Delta compression: only changed object properties are transmitted
- * - Up to 9 float values per object (location/rotation/scale × 3 axes)
- * - Optional short ASCII/UTF-8 text field in the same packet
- * - Big-endian float representation
- * - Designed for low-bandwidth, real-time applications 
+ *   - Framed binary format with STX / ETX markers
+ *   - 8-bit XOR checksum covering header + payload
+ *   - Delta compression: only changed object properties are transmitted
+ *   - Up to 9 float values per object (location / rotation / scale × 3 axes)
+ *   - Optional short ASCII/UTF-8 text field in the same packet
+ *   - Big-endian float representation
+ *   - Designed for low-bandwidth, real-time applications
  *
- * Typical packet structure (big-endian fields):
- *   STX [0x02]
- *   msgType       (1 byte)    1=objects only, 2=text only, 3=objects+text
- *   objCount      (1 byte)
- *   payloadLen    (2 bytes)
- *   payload       (0–MAX_PAYLOAD bytes)
- *   checksum      (1 byte)    XOR of bytes from msgType to end of payload
- *   ETX           [0x03]
+ * Packet structure (big-endian fields):
+ *
+ *   [ STX (1) | msgType (1) | objCount (1) | payloadLen (2) | payload (N) | checksum (1) | ETX (1) ]
+ *
+ *   msgType:  1 = objects only
+ *             2 = text only: text fills payload, no length prefix
+ *             3 = objects + text: text preceded by 1-byte length prefix
+ *
+ *   Per-object payload layout:
+ *   [ objID (1) | mask (2) | float_0 (4) | float_1 (4) | … ]
+ *   Only floats whose corresponding mask bit is set are present.
+ *
+ *   Checksum: XOR of all bytes from msgType through end of payload (STX and ETX excluded).
+ *
+ * Threading note:
+ *   This library targets single-threaded Arduino-framework environments
+ *   (Uno, Mega, ESP8266, ESP32 default loop, etc.).  bodBuild() and bodParse()
+ *   share one payload buffer; they must never execute concurrently.
+ *   Do NOT call these functions from separate RTOS tasks without external locking.
  */
 
 
@@ -53,48 +64,46 @@
 #include <Arduino.h>
 #include "blendixserial_config.h"
 
-//  Compile-time limits (overridable via config)
+
+//Compile-time limits (overridable via blendixserial_config.h)
+
 #ifndef BLENDIXSERIAL_MAX_OBJECTS
-#define BLENDIXSERIAL_MAX_OBJECTS 3
+#  define BLENDIXSERIAL_MAX_OBJECTS  3
 #endif
 
 #ifndef BLENDIXSERIAL_MAX_PAYLOAD
-#define BLENDIXSERIAL_MAX_PAYLOAD 128
+#  define BLENDIXSERIAL_MAX_PAYLOAD  128
 #endif
 
 #ifndef BLENDIXSERIAL_MAX_TEXT
-#define BLENDIXSERIAL_MAX_TEXT 24
+#  define BLENDIXSERIAL_MAX_TEXT     24
 #endif
 
-#define BLENDIXSERIAL_MAX_PACKET_SIZE (BLENDIXSERIAL_MAX_PAYLOAD + 7)
+/** Total worst-case output buffer size needed by bodBuild(). */
+#define BLENDIXSERIAL_MAX_PACKET_SIZE  (BLENDIXSERIAL_MAX_PAYLOAD + 7)
 
 
-/**
- * @name Protocol framing constants
- * @{
- */
-#define BLENDIXSERIAL_STX 0x02 ///< Start-of-frame marker (ASCII STX)
-#define BLENDIXSERIAL_ETX 0x03 ///< End-of-frame marker   (ASCII ETX)
-/** @} */
+// Protocol framing constants 
+#define BLENDIXSERIAL_STX  0x02   ///< Start-of-frame marker (ASCII STX)
+#define BLENDIXSERIAL_ETX  0x03   ///< End-of-frame marker   (ASCII ETX)
 
 
+// Public enumerations
 
 /**
  * @enum Property
- * @brief Transform property groups supported by the protocol
+ * @brief Transform property group.
  */
 enum Property
 {
-    Location = 0,   ///< Position / translation             (bits 0–2)
-    Rotation = 1,   ///< Rotation (XYZ extrinsic)           (bits 3–5)
-    Scale    = 2    ///< Non-uniform scale                  (bits 6–8)
+    Location = 0,   ///< Position / translation   (maps to values[0..2])
+    Rotation = 1,   ///< Rotation (XYZ extrinsic) (maps to values[3..5])
+    Scale    = 2    ///< Non-uniform scale         (maps to values[6..8])
 };
-
-
 
 /**
  * @enum Axis
- * @brief Individual component within a Property
+ * @brief Component within a Property.
  */
 enum Axis
 {
@@ -107,215 +116,272 @@ enum Axis
 
 /**
  * @class blendixserial
- * @brief Core stateful handler for the BlendixSerial protocol (send + receive)
+ * @brief Stateful handler for the BlendixSerial protocol (send + receive).
  *
- * Thread safety: None |  designed for single-threaded Arduino loop() usage.
- *                 Not safe to call member functions from ISR or multiple tasks
- *                 without external synchronization.
+ * Thread safety: NONE.
+ *   Designed exclusively for single-threaded Arduino loop() usage.
+ *   See threading note in the file header.
  */
 class blendixserial
 {
 public:
 
     /**
-     * @brief Default constructor – initializes clean state
+     * @brief Default constructor, brings the object into a clean initial state.
      *
      * Postconditions:
-     *  - All object states are cleared (bitmask=0, dirty=false)
-     *  - Text buffers/flags are cleared
-     *  - Receive FSM is in WAIT_STX state
+     *   - All object txMask / rxMask = 0, dirty = false
+     *   - Text buffers cleared, all text flags false
+     *   - RX parser in WAIT_STX state
      *
-     * Complexity: O(1) — fixed size arrays
+     * Complexity: O(1)
      */
     blendixserial();
 
-
     /**
-     * @brief Set value of one specific transform component
-     * @param obj   Object index [0 .. BLENDIXSERIAL_MAX_OBJECTS-1]
-     * @param prop  Which transform property (Location / Rotation / Scale)
-     * @param axis  Which axis (X/Y/Z)
-     * @param value New value (IEEE 754 single precision float)
+     * @brief Set one transform component and mark it for transmission.
      *
-     * Behavior:
-     *  - Marks the corresponding bit in the object's change mask
-     *  - Sets the dirty flag → object will be included in next bodBuild()
-     *  - Overwrites previous value (even if it was already set)
+     * @param obj    Object index [0 .. BLENDIXSERIAL_MAX_OBJECTS-1].
+     *               Out-of-range values are silently ignored.
+     * @param prop   Which property group (Location / Rotation / Scale).
+     * @param axis   Which axis (X / Y / Z).
+     * @param value  New value (IEEE 754 single-precision float).
      *
-     * Preconditions:
-     *  - obj < BLENDIXSERIAL_MAX_OBJECTS  (otherwise call is ignored)
+     * Marks the axis in txMask and sets the object dirty.
+     * Any previous unsent value for this axis is overwritten.
      *
      * Complexity: O(1)
-    */
+     */
     void setValue(uint8_t obj, Property prop, Axis axis, float value);
 
-
     /**
-     * @brief Convenience function – set all three location components at once
-     * @param obj   Object index [0 .. BLENDIXSERIAL_MAX_OBJECTS-1]
-     * @param x,y,z New position coordinates
-     *
-     * Equivalent to three consecutive setValue() calls for Location axis X/Y/Z.
-     * Marks object dirty if any component changes (actually always, because
-     * previous values are not compared).
+     * @brief Set all three Location components at once.
+     * Equivalent to three setValue() calls for Location X, Y, Z.
      */
     void setLocation(uint8_t obj, float x, float y, float z);
-
 
     /// @copydoc setLocation()
     void setRotation(uint8_t obj, float x, float y, float z);
 
-
     /// @copydoc setLocation()
     void setScale(uint8_t obj, float x, float y, float z);
 
-
     /**
-     * @brief Queue a short text message to be sent with the next packet
-     * @param text  Null-terminated C-string (UTF-8 compatible)
+     * @brief Queue a short text message for transmission in the next packet.
      *
-     * Constraints:
-     *  - Maximum storable length = BLENDIXSERIAL_MAX_TEXT - 1
-     *  - Longer strings are silently truncated
-     *  - Empty string ("") is allowed and will be sent
+     * @param text  Null-terminated C-string (UTF-8 compatible).
+     *              Strings longer than (BLENDIXSERIAL_MAX_TEXT - 1) are silently truncated.
      *
-     * Behavior:
-     *  - Copies string into internal buffer + adds null terminator
-     *  - Sets textDirty flag → text will be included in next bodBuild()
-     *  - Previous text (if unsent) is overwritten
+     * Copies the string into the internal TX text buffer and sets the dirty
+     * flag. Any previously queued unsent text is overwritten.
      *
-     * Complexity: O(n) where n = strlen(text), bounded by MAX_TEXT
+     * Complexity: O(n), n = strlen(text), bounded by MAX_TEXT
      */
     void setText(const char *text);
 
 
+    // TX build 
+
     /**
-     * @brief Build one complete protocol frame if there is new data to send
-     * @param buffer  Output buffer — **must** be at least BLENDIXSERIAL_MAX_PACKET_SIZE bytes
-     * @return        Number of bytes written to buffer [7 .. MAX_PACKET_SIZE]
-     *                or 0 if nothing to send (no dirty objects and no pending text)
+     * @brief Build one complete protocol frame if there is new data to send.
      *
-     * Confidence:
-     *  - When return > 0 → buffer[0] = STX, buffer[return-1] = ETX
-     *  - Checksum is correct (verified on receiving side)
-     *  - All dirty flags and textDirty flag are cleared after successful build
-     *  - Payload never exceeds BLENDIXSERIAL_MAX_PAYLOAD
+     * @param buffer  Output buffer. Must be at least BLENDIXSERIAL_MAX_PACKET_SIZE bytes.
+     * @return        Number of bytes written (7 .. MAX_PACKET_SIZE), or 0 if nothing
+     *                is pending (no dirty objects and no pending text).
      *
-     * Edge cases handled:
-     *  - No data → returns 0
-     *  - Text only → msgType=2
-     *  - Objects only → msgType=1
-     *  - Both → msgType=3
-     *  - Payload would overflow → silently drops oldest objects until it fits
+     * Confidence when return > 0:
+     *   - buffer[0] == STX, buffer[return-1] == ETX
+     *   - Checksum is correct
+     *   - Payload does not exceed BLENDIXSERIAL_MAX_PAYLOAD
+     *   - All dirty flags (objects + text) are cleared ONLY on success
      *
-     * Complexity: O(k) where k = number of changed axes across all objects
+     * If the payload would overflow MAX_PAYLOAD, returns 0 and leaves all
+     * dirty flags unchanged so the next call will retry with the full data.
+     * No data is silently lost.
+     *
+     * Complexity: O(k), k = number of changed axes across all dirty objects
      */
     uint16_t bodBuild(uint8_t *buffer);
 
-    
+
+    // RX parser 
+
     /**
-     * @brief Feed one incoming byte into the incremental parser
-     * @param byte  Single byte received from UART / stream
-     * @return      true  = a complete, valid packet was just parsed & applied
-     *              false = parsing still in progress or error occurred (state reset)
+     * @brief Feed one incoming byte into the incremental frame parser.
+     *
+     * @param byte  A single byte read from Serial (or any stream).
+     * @return      true  = a complete, checksum-valid packet was just parsed
+     *                      and applied to internal state.
+     *              false = still accumulating, or a framing / checksum error
+     *                      occurred (parser auto-resets and waits for next STX).
      *
      * Typical usage:
+     * @code
      *   while (Serial.available()) {
      *     if (protocol.bodParse(Serial.read())) {
-     *       // new data available via getLocation(), textAvailable(), etc.
+     *       // new values ready
      *     }
      *   }
+     * @endcode
      *
      * Robustness:
-     *  - Recovers from garbage / partial frames by waiting for next STX
-     *  - Validates payload length against MAX_PAYLOAD
-     *  - Verifies checksum before applying any changes
+     *   - Resynchronises on any garbage / partial frame by waiting for next STX
+     *   - Rejects payloads larger than BLENDIXSERIAL_MAX_PAYLOAD
+     *   - Verifies checksum before writing any state
      *
-     * Complexity: O(1) amortized per byte
+     * Complexity: O(1) amortised per byte
      */
     bool bodParse(uint8_t byte);
 
 
+    // RX query: read received values 
+
     /**
-     * @brief Check whether a specific component has been received at least once
-     * @return true  = value is valid (has been set by incoming packet)
-     *         false = never received → do not use value
+     * @brief Check whether a specific axis has been received at least once.
+     *
+     * @param obj   Object index [0 .. BLENDIXSERIAL_MAX_OBJECTS-1].
+     *              Out-of-range returns false.
+     * @return true  = value is valid (arrived in at least one received packet)
+     *         false = never received, or obj out of range
      */
     bool axisAvailable(uint8_t obj, Property prop, Axis axis);
 
-
     /**
-     * @brief Get most recently received value for one component
+     * @brief Get the most recently received value for one axis.
+     *
+     * @param obj  Object index [0 .. BLENDIXSERIAL_MAX_OBJECTS-1].
+     *             Out-of-range returns 0.0f.
+     * @note  Call axisAvailable() first if you need to know whether a value
+     *        has actually arrived.
      */
     float getValue(uint8_t obj, Property prop, Axis axis);
 
-
-    /// @brief Get most recent location triplet (only reads — no availability check)
+    /**
+     * @brief Read the most recent received Location triplet.
+     * @note  No availability check is performed. Uninitialised axes read as 0.0f.
+     */
     void getLocation(uint8_t obj, float &x, float &y, float &z);
 
-
-    /// @brief Get most recent rotation triplet
+    /// @brief Read the most recent received Rotation triplet.
     void getRotation(uint8_t obj, float &x, float &y, float &z);
 
-
-    /// @brief Get most recent scale triplet
+    /// @brief Read the most recent received Scale triplet.
     void getScale(uint8_t obj, float &x, float &y, float &z);
 
 
+    //  RX text API (requires BLENDIXSERIAL_ENABLE_TEXT_RX)
+    //
+    // These methods are compiled in only when BLENDIXSERIAL_ENABLE_TEXT_RX is
+    // defined (in blendixserial_config.h or before the #include in your sketch).
+    //
+    // Background: currently the Blender add-on does not send text to the MCU.
+    // The TX text path (setText / bodBuild) is fully functional in both modes.
+    // The RX text path is reserved for a future Blender update and is gated
+    // behind this flag to save RAM on memory-constrained boards (e.g. Uno).
+    //
+    // To enable:  #define BLENDIXSERIAL_ENABLE_TEXT_RX   (in config or sketch)
+    // Memory cost: +BLENDIXSERIAL_MAX_TEXT bytes (default: +24 bytes)
+
+#ifdef BLENDIXSERIAL_ENABLE_TEXT_RX
+
     /**
-     * Receiving Text API (Future Use) 
-     * These methods are reserved for future updates when Blender gain text sending capabilities.
+     * @brief Returns true if a new text message has arrived since the last
+     *        clearText() call.
      */
     bool textAvailable();
-    const char* getText();
+
+    /**
+     * @brief Returns a pointer to the null-terminated received text buffer.
+     *
+     * The returned pointer is valid until the next received packet that
+     * contains text, or until clearText() is called.
+     *
+     * This function does NOT consume / clear the available flag.
+     * Call clearText() explicitly when you are done with the text.
+     */
+    const char *getText();
+
+    /**
+     * @brief Mark the received text as consumed.
+     *
+     * After this call, textAvailable() returns false until the next text
+     * packet arrives. Does not modify the buffer contents.
+     */
+    void clearText();
+
+#endif // BLENDIXSERIAL_ENABLE_TEXT_RX
 
 
 private:
-    //  Internal types & state
+
+    // Internal object state 
+
     struct ObjectState
     {
-        float values[9];    ///< [0–2] location  [3–5] rotation  [6–8] scale
-        uint16_t bitmask;   ///< bit i set = values[i] is valid
-        bool dirty;         ///< needs to be sent
+        float    values[9];   ///< [0-2] location  [3-5] rotation  [6-8] scale
+        uint16_t txMask;      ///< Axes marked dirty for TX (set by setValue)
+        uint16_t rxMask;      ///< Axes received from remote (set by decodePacket)
+        bool     dirty;       ///< true = has unsent changes, include in next bodBuild
     };
 
     ObjectState objects[BLENDIXSERIAL_MAX_OBJECTS];
 
-    // text mirror 
 
-    char textBuffer[BLENDIXSERIAL_MAX_TEXT];
-    bool textDirty;
-    bool textReceived;
+    // Text state
 
-    // decoder 
+    char txTextBuffer[BLENDIXSERIAL_MAX_TEXT];  ///< Outgoing text (setText → bodBuild)
+    bool txTextDirty;                           ///< true = txTextBuffer has unsent text
 
-    enum RXSTATE
+#ifdef BLENDIXSERIAL_ENABLE_TEXT_RX
+    char rxTextBuffer[BLENDIXSERIAL_MAX_TEXT];  ///< Incoming text (decodePacket → getText)
+    bool rxTextReceived;                        ///< true = new text arrived, not yet consumed
+#endif
+
+
+    // RX parser state machine 
+
+    enum RxState
     {
-        WAIT_STX,
-        READ_HEADER,
-        READ_PAYLOAD,
-        READ_CHECKSUM,
-        WAIT_ETX
+        WAIT_STX,       ///< Waiting for 0x02, resync point
+        READ_HEADER,    ///< Collecting 4 header bytes (msgType, objCount, lenH, lenL)
+        READ_PAYLOAD,   ///< Filling payload[] byte by byte up to payloadLen
+        READ_CHECKSUM,  ///< Reading the single checksum byte
+        WAIT_ETX        ///< Expecting 0x03, then verifying and applying
     };
 
-    // Decoder FSM
-    RXSTATE rxState;
+    RxState  rxState;
 
-    uint8_t header[4];
-    uint8_t payload[BLENDIXSERIAL_MAX_PAYLOAD];
+    uint8_t  header[4];                       ///< [0]=msgType [1]=objCount [2]=lenH [3]=lenL
+    uint8_t  payload[BLENDIXSERIAL_MAX_PAYLOAD]; ///< Shared TX/RX buffer -- see threading note
 
-    uint16_t payloadLen;
-    uint16_t payloadIndex;
-    uint8_t headerIndex;
+    uint16_t payloadLen;    ///< Declared payload length from received header
+    uint16_t payloadIndex;  ///< Current write position in payload[] during RX
+    uint8_t  headerIndex;   ///< Current write position in header[] during RX
+    uint8_t  rxChecksum;    ///< Received checksum byte (stored in READ_CHECKSUM state)
 
-    uint8_t checksum;
 
-    //  Private implementation helpers
+    //  Private helpers 
 
+    /** Reset RX parser to WAIT_STX. Called after success or any error. */
     void resetRX();
 
-    uint16_t buildPayload(uint8_t *payload, uint8_t &msgType, uint8_t &objCount);
+    /**
+     * Build the variable-length payload into this->payload[].
+     *
+     * @param msgType   Output: 1, 2, or 3 (set by this function).
+     * @param objCount  Output: number of objects serialised.
+     * @return          Number of bytes written, or 0 if nothing to send or
+     *                  payload would overflow MAX_PAYLOAD.
+     *
+     * IMPORTANT: Dirty flags are NOT cleared here. They are cleared by
+     * bodBuild() only after the complete frame is successfully assembled.
+     * This ensures no data is lost on overflow.
+     */
+    uint16_t buildPayload(uint8_t &msgType, uint8_t &objCount);
 
+    /**
+     * Apply a verified, checksum-correct packet to internal state.
+     * Called only from bodParse() after checksum passes.
+     */
     void decodePacket(uint8_t msgType, uint8_t objCount);
-
 };
